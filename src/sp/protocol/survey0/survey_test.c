@@ -627,6 +627,137 @@ test_surv_validate_peer(void)
 	nng_stats_free(stats);
 }
 
+typedef struct {
+	nng_mtx *mtx;
+	nng_cv  *cv;
+	int      listen_ready;
+	int      dial_ready;
+	int      num_surveys;
+	int      port;
+} thread_test_args;
+
+static void
+surveyor_thread(void *arg)
+{
+	int              i;
+	thread_test_args *args = arg;
+	nng_socket        surveyor;
+	nng_listener      listener;
+	nng_msg          *survey_msg   = NULL;
+	nng_msg          *response_msg = NULL;
+
+	NUTS_PASS(nng_surveyor0_open(&surveyor));
+	NUTS_PASS(nng_socket_set_ms(
+	    surveyor, NNG_OPT_SURVEYOR_SURVEYTIME, 5000));
+	NUTS_PASS(nng_socket_set_ms(surveyor, NNG_OPT_RECVTIMEO, 5000));
+	NUTS_PASS(nng_socket_set_ms(surveyor, NNG_OPT_SENDTIMEO, 5000));
+	NUTS_PASS(nng_listen(surveyor, "tcp://127.0.0.1:0", &listener, 0));
+	NUTS_PASS(nng_listener_get_int(listener, NNG_OPT_TCP_BOUND_PORT, &args->port));
+
+	nng_mtx_lock(args->mtx);
+	args->listen_ready = 1;
+	nng_cv_wake(args->cv);
+	nng_mtx_unlock(args->mtx);
+
+	nng_mtx_lock(args->mtx);
+	while (args->dial_ready == 0) {
+		nng_cv_wait(args->cv);
+	}
+	nng_mtx_unlock(args->mtx);
+
+	for (i = 0; i < args->num_surveys; ++i) {
+		NUTS_PASS(nng_msg_alloc(&survey_msg, 0));
+		NUTS_PASS(nng_msg_append(survey_msg, "hello", 5));
+		NUTS_PASS(nng_sendmsg(surveyor, survey_msg, 0));
+
+		NUTS_PASS(nng_recvmsg(surveyor, &response_msg, 0));
+		NUTS_TRUE(nng_msg_len(response_msg) == 5);
+		NUTS_TRUE(memcmp(nng_msg_body(response_msg), "again", 5) == 0);
+	}
+
+	nng_msg_free(response_msg);
+	NUTS_CLOSE(surveyor);
+}
+
+static void
+respondent_thread(void *arg)
+{
+	int        i;
+	thread_test_args *args = arg;
+	nng_socket        respondent;
+	nng_msg          *survey_msg   = NULL;
+	nng_msg          *response_msg = NULL;
+	char              url[64];
+
+	NUTS_PASS(nng_respondent0_open(&respondent));
+	NUTS_PASS(nng_socket_set_ms(respondent, NNG_OPT_RECVTIMEO, 5000));
+	NUTS_PASS(nng_socket_set_ms(respondent, NNG_OPT_SENDTIMEO, 5000));
+
+	nng_mtx_lock(args->mtx);
+	while (args->listen_ready == 0) {
+		nng_cv_wait(args->cv);
+	}
+	nng_mtx_unlock(args->mtx);
+
+	snprintf(url, sizeof(url), "tcp://127.0.0.1:%d", args->port);
+	NUTS_PASS(nng_dial(respondent, url, NULL, 0));
+
+	// WORKAROUND: Add a small delay after dial to allow the pipe's
+	// receive operation to be fully posted before the surveyor sends.
+	// This addresses a race condition where the surveyor can send a
+	// survey message before the respondent's pipe is ready to receive.
+	// TODO: Fix the underlying race condition in the protocol implementation.
+	// NUTS_SLEEP(20);
+
+	nng_mtx_lock(args->mtx);
+	args->dial_ready = 1;
+	nng_cv_wake(args->cv);
+	nng_mtx_unlock(args->mtx);
+
+	for (i = 0; i < args->num_surveys; ++i) {
+		NUTS_PASS(nng_recvmsg(respondent, &survey_msg, 0));
+		NUTS_TRUE(nng_msg_len(survey_msg) == 5);
+		NUTS_TRUE(memcmp(nng_msg_body(survey_msg), "hello", 5) == 0);
+
+		nng_msg_free(survey_msg);
+
+		NUTS_PASS(nng_msg_alloc(&response_msg, 0));
+		NUTS_PASS(nng_msg_append(response_msg, "again", 5));
+		NUTS_PASS(nng_sendmsg(respondent, response_msg, 0));
+	}
+
+
+	NUTS_CLOSE(respondent);
+}
+
+static void
+test_surv_threaded_exchange(void)
+{
+	int              i;
+	thread_test_args args;
+	nng_thread      *surv_thr;
+	nng_thread      *resp_thr;
+
+	for (i = 0; i < 100; ++i) {
+		NUTS_PASS(nng_mtx_alloc(&args.mtx));
+		NUTS_PASS(nng_cv_alloc(&args.cv, args.mtx));
+		args.listen_ready = 0;
+		args.dial_ready   = 0;
+		args.num_surveys  = 10;
+		args.port         = 0;
+
+		NUTS_PASS(nng_thread_create(&surv_thr, surveyor_thread, &args));
+		NUTS_PASS(nng_thread_create(&resp_thr, respondent_thread, &args));
+
+		// Join the threads (nng_thread_destroy waits for completion)
+		nng_thread_destroy(surv_thr);
+		nng_thread_destroy(resp_thr);
+
+		nng_cv_free(args.cv);
+		nng_mtx_free(args.mtx);
+	}
+}
+
 TEST_LIST = {
 	{ "survey identity", test_surv_identity },
 	{ "survey ttl option", test_surv_ttl_option },
@@ -649,5 +780,6 @@ TEST_LIST = {
 	{ "survey send best effort", test_surv_send_best_effort },
 	{ "survey context multi", test_surv_context_multi },
 	{ "survey validate peer", test_surv_validate_peer },
+	{ "survey threaded exchange", test_surv_threaded_exchange },
 	{ NULL, NULL },
 };
