@@ -633,13 +633,14 @@ typedef struct {
 	int      listen_ready;
 	int      dial_ready;
 	int      num_surveys;
+	int      num_respondents;
 	int      port;
 } thread_test_args;
 
 static void
 surveyor_thread(void *arg)
 {
-	int              i;
+	int              i, j;
 	thread_test_args *args = arg;
 	nng_socket        surveyor;
 	nng_listener      listener;
@@ -660,7 +661,7 @@ surveyor_thread(void *arg)
 	nng_mtx_unlock(args->mtx);
 
 	nng_mtx_lock(args->mtx);
-	while (args->dial_ready == 0) {
+	while (args->dial_ready < args->num_respondents) {
 		nng_cv_wait(args->cv);
 	}
 	nng_mtx_unlock(args->mtx);
@@ -670,12 +671,15 @@ surveyor_thread(void *arg)
 		NUTS_PASS(nng_msg_append(survey_msg, "hello", 5));
 		NUTS_PASS(nng_sendmsg(surveyor, survey_msg, 0));
 
-		NUTS_PASS(nng_recvmsg(surveyor, &response_msg, 0));
-		NUTS_TRUE(nng_msg_len(response_msg) == 5);
-		NUTS_TRUE(memcmp(nng_msg_body(response_msg), "again", 5) == 0);
+		// Receive responses from all respondents
+		for (j = 0; j < args->num_respondents; ++j) {
+			NUTS_PASS(nng_recvmsg(surveyor, &response_msg, 0));
+			NUTS_TRUE(nng_msg_len(response_msg) == 5);
+			NUTS_TRUE(memcmp(nng_msg_body(response_msg), "again", 5) == 0);
+			nng_msg_free(response_msg);
+		}
 	}
 
-	nng_msg_free(response_msg);
 	NUTS_CLOSE(surveyor);
 }
 
@@ -710,7 +714,7 @@ respondent_thread(void *arg)
 	// NUTS_SLEEP(20);
 
 	nng_mtx_lock(args->mtx);
-	args->dial_ready = 1;
+	args->dial_ready++;
 	nng_cv_wake(args->cv);
 	nng_mtx_unlock(args->mtx);
 
@@ -733,26 +737,33 @@ respondent_thread(void *arg)
 static void
 test_surv_threaded_exchange(void)
 {
-	int              i;
+	int              i, j;
 	thread_test_args args;
 	nng_thread      *surv_thr;
-	nng_thread      *resp_thr;
+	nng_thread      *resp_thr[5];
 
 	// This is a very high number just for testing
 	for (i = 0; i < 1000; ++i) {
 		NUTS_PASS(nng_mtx_alloc(&args.mtx));
 		NUTS_PASS(nng_cv_alloc(&args.cv, args.mtx));
-		args.listen_ready = 0;
-		args.dial_ready   = 0;
-		args.num_surveys  = 10;
-		args.port         = 0;
+		args.listen_ready     = 0;
+		args.dial_ready       = 0;
+		args.num_surveys      = 10;
+		args.num_respondents  = 5;
+		args.port             = 0;
 
 		NUTS_PASS(nng_thread_create(&surv_thr, surveyor_thread, &args));
-		NUTS_PASS(nng_thread_create(&resp_thr, respondent_thread, &args));
+		
+		// Create 5 respondent threads
+		for (j = 0; j < args.num_respondents; ++j) {
+			NUTS_PASS(nng_thread_create(&resp_thr[j], respondent_thread, &args));
+		}
 
 		// Join the threads (nng_thread_destroy waits for completion)
 		nng_thread_destroy(surv_thr);
-		nng_thread_destroy(resp_thr);
+		for (j = 0; j < args.num_respondents; ++j) {
+			nng_thread_destroy(resp_thr[j]);
+		}
 
 		nng_cv_free(args.cv);
 		nng_mtx_free(args.mtx);
