@@ -738,7 +738,8 @@ test_surv_threaded_exchange(void)
 	nng_thread      *surv_thr;
 	nng_thread      *resp_thr;
 
-	for (i = 0; i < 100; ++i) {
+	// This is a very high number just for testing
+	for (i = 0; i < 1000; ++i) {
 		NUTS_PASS(nng_mtx_alloc(&args.mtx));
 		NUTS_PASS(nng_cv_alloc(&args.cv, args.mtx));
 		args.listen_ready = 0;

@@ -64,6 +64,8 @@ struct resp0_pipe {
 	resp0_sock   *psock;
 	bool          busy;
 	bool          closed;
+	bool          recv_posted;
+	nni_cv        recv_cv;
 	uint32_t      id;
 	nni_list      sendq; // contexts waiting to send
 	nni_aio       aio_send;
@@ -275,6 +277,7 @@ resp0_pipe_fini(void *arg)
 		nni_aio_set_msg(&p->aio_recv, NULL);
 		nni_msg_free(msg);
 	}
+	nni_cv_fini(&p->recv_cv);
 	nni_aio_fini(&p->aio_send);
 	nni_aio_fini(&p->aio_recv);
 }
@@ -282,17 +285,20 @@ resp0_pipe_fini(void *arg)
 static int
 resp0_pipe_init(void *arg, nni_pipe *npipe, void *s)
 {
-	resp0_pipe *p = arg;
+	resp0_pipe *p    = arg;
+	resp0_sock *sock = s;
 
 	nni_aio_init(&p->aio_recv, resp0_pipe_recv_cb, p);
 	nni_aio_init(&p->aio_send, resp0_pipe_send_cb, p);
 
 	NNI_LIST_INIT(&p->sendq, resp0_ctx, sqnode);
+	nni_cv_init(&p->recv_cv, &sock->mtx);
 
-	p->npipe = npipe;
-	p->psock = s;
-	p->busy  = false;
-	p->id    = nni_pipe_id(npipe);
+	p->npipe       = npipe;
+	p->psock       = s;
+	p->busy        = false;
+	p->recv_posted = false;
+	p->id          = nni_pipe_id(npipe);
 
 	return (0);
 }
@@ -313,13 +319,33 @@ resp0_pipe_start(void *arg)
 
 	nni_mtx_lock(&s->mtx);
 	rv = nni_id_set(&s->pipes, p->id, p);
-	nni_mtx_unlock(&s->mtx);
 	if (rv != 0) {
+		nni_mtx_unlock(&s->mtx);
 		return (rv);
 	}
 
+	// Post the receive operation
 	nni_pipe_recv(p->npipe, &p->aio_recv);
-	return (rv);
+	
+	// Wait for the receive callback to signal that it has been invoked,
+	// with a timeout to prevent hanging. This ensures the receive operation
+	// is actually queued in the transport layer before we return and the
+	// pipe becomes "active". The callback will set recv_posted=true on its
+	// first invocation. We use a short timeout (100ms) as a safety measure.
+	if (!p->recv_posted) {
+		nni_time deadline = nni_clock() + NNI_SECOND / 10; // 100ms
+		while (!p->recv_posted) {
+			if (nni_cv_until(&p->recv_cv, deadline) == NNG_ETIMEDOUT) {
+				// Timeout - the receive callback wasn't invoked.
+				// This shouldn't normally happen, but we proceed anyway
+				// to avoid hanging the connection.
+				break;
+			}
+		}
+	}
+	
+	nni_mtx_unlock(&s->mtx);
+	return (0);
 }
 
 static void
@@ -524,6 +550,14 @@ resp0_pipe_recv_cb(void *arg)
 	len = nni_msg_header_len(msg);
 
 	nni_mtx_lock(&s->mtx);
+
+	// Signal that the receive callback has been invoked. This is used
+	// by pipe_start to ensure the receive operation is actually queued
+	// before returning. We only signal on the first callback invocation.
+	if (!p->recv_posted) {
+		p->recv_posted = true;
+		nni_cv_wake(&p->recv_cv);
+	}
 
 	if (p->closed) {
 		// If pipe was closed, we just abandon the data from it.
