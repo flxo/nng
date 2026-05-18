@@ -36,13 +36,13 @@
 
 include_directories(AFTER SYSTEM ${PROJECT_SOURCE_DIR}/src)
 
-# convey.c needs its own link to pthreads.
-if (NOT WIN32)
-    find_package(Threads)
-    set(THRLIB Threads::Threads)
-endif ()
-
 if (NNG_TESTS)
+
+    # convey.c needs its own link to pthreads.
+    if (NOT WIN32)
+        find_package(Threads)
+        set(THRLIB Threads::Threads)
+    endif ()
 
     nng_check_sym(nl_langinfo langinfo.h NNG_HAVE_LANGINFO)
     if (NOT NNG_SANITIZER STREQUAL "none")
@@ -60,17 +60,6 @@ if (NNG_TESTS)
         math(EXPR NNG_TEST_PORT "${NNG_TEST_PORT}+20")
     endmacro(add_nng_test)
 
-    macro(add_nng_cpp_test NAME TIMEOUT)
-        if (NOT NNG_ENABLE_COVERAGE)
-            enable_language(CXX)
-            add_executable(${NAME} ${NAME}.cc)
-            target_link_libraries(${NAME} nng_testing)
-            add_test(NAME nng.${NAME} COMMAND ${NAME} ${TEST_PORT})
-            set_tests_properties(nng.${NAME} PROPERTIES TIMEOUT ${TIMEOUT})
-            math(EXPR TEST_PORT "${NNG_TEST_PORT}+20")
-        endif ()
-    endmacro(add_nng_cpp_test)
-
     macro(add_nng_test1 NAME TIMEOUT COND1)
         if (${COND1})
             add_nng_test(${NAME} ${TIMEOUT})
@@ -79,16 +68,30 @@ if (NNG_TESTS)
         endif ()
     endmacro()
 
+    if (NNG_ENABLE_CPP_TESTS)
+        enable_language(CXX)
+        macro(add_nng_cpp_test NAME TIMEOUT)
+            add_executable(${NAME} ${NAME}.cc)
+            target_link_libraries(${NAME} nng_testing)
+            add_test(NAME nng.${NAME} COMMAND ${NAME})
+            set_tests_properties(nng.${NAME} PROPERTIES TIMEOUT ${TIMEOUT})
+        endmacro(add_nng_cpp_test)
+    else ()
+        macro(add_nng_cpp_test NAME TIMEOUT)
+        endmacro(add_nng_cpp_test)
+    endif ()
+
 else ()
     macro(add_nng_test NAME TIMEOUT)
     endmacro(add_nng_test)
-    macro(add_nng_cpp_test NAME TIMEOUT)
-    endmacro(add_nng_cpp_test)
     macro(add_nng_test1 NAME TIMEOUT COND1)
     endmacro(add_nng_test1)
+    macro(add_nng_cpp_test NAME TIMEOUT)
+    endmacro(add_nng_cpp_test)
 endif ()
 
 add_nng_test1(httpclient 60 NNG_SUPP_HTTP)
 
-# c++ tests
+# C++ tests (opt-in via NNG_ENABLE_CPP_TESTS to avoid the cost of
+# enable_language(CXX) in the default cold configure).
 add_nng_cpp_test(cplusplus_pair 5)

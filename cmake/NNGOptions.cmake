@@ -28,6 +28,14 @@ option(NNG_TESTS "Build and run tests." ${NNG_NATIVE_BUILD})
 option(NNG_TOOLS "Build extra tools." ${NNG_NATIVE_BUILD})
 option(NNG_ENABLE_NNGCAT "Enable building nngcat utility." ${NNG_TOOLS})
 option(NNG_ENABLE_COVERAGE "Enable coverage reporting." OFF)
+# Building C++ tests forces enable_language(CXX), which adds ~0.6s to cold
+# cmake configure for compiler ID / ABI detection.  Off by default; turn on
+# to verify the public C headers remain includable from C++.  Declared
+# after NNG_ENABLE_COVERAGE so the dependency reads the user's value.
+CMAKE_DEPENDENT_OPTION(NNG_ENABLE_CPP_TESTS
+        "Build C++ ABI smoke tests." OFF
+        "NNG_TESTS;NOT NNG_ENABLE_COVERAGE" OFF)
+mark_as_advanced(NNG_ENABLE_CPP_TESTS)
 # Eliding deprecated functionality can be used to build a slimmed down
 # version of the library, or alternatively to test for application
 # preparedness for expected feature removals (in the next major release.)

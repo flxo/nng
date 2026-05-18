@@ -24,65 +24,125 @@ if (NNG_PLATFORM_POSIX)
     nng_defines(_THREAD_SAFE)
     nng_defines(_POSIX_PTHREAD_SEMANTICS)
 
-    nng_check_func(lockf NNG_HAVE_LOCKF)
-    nng_check_func(flock NNG_HAVE_FLOCK)
-    nng_check_func(getentropy NNG_HAVE_GETENTROPY)
-    nng_check_func(getrandom NNG_HAVE_GETRANDOM)
-    nng_check_func(arc4random_buf NNG_HAVE_ARC4RANDOM)
-    nng_check_func(recvmsg NNG_HAVE_RECVMSG)
-    nng_check_func(sendmsg NNG_HAVE_SENDMSG)
+    # Hardcoded feature flags below need to be visible both as compile
+    # definitions (for source files) and as CMake variables (for poller /
+    # entropy selection later in this file).  nng_have does both.
+    macro(nng_have DEF)
+        set(${DEF} ON)
+        nng_defines(${DEF})
+    endmacro()
 
-    nng_check_func(clock_gettime NNG_HAVE_CLOCK_GETTIME_LIBC)
-    if (NNG_HAVE_CLOCK_GETTIME_LIBC)
-        nng_defines_if(NNG_HAVE_CLOCK_GETTIME_LIBC NNG_HAVE_CLOCK_GETTIME)
-    else()
-        nng_check_lib(rt clock_gettime NNG_HAVE_CLOCK_GETTIME)
+    # Features mandated by POSIX.1 on every supported target.
+    nng_have(NNG_HAVE_RECVMSG)
+    nng_have(NNG_HAVE_SENDMSG)
+    nng_have(NNG_HAVE_MSG_CONTROL)
+    nng_have(NNG_HAVE_UNIX_SOCKETS)
+    nng_have(NNG_HAVE_SOCKETPAIR)
+    nng_have(NNG_HAVE_INET6)
+    nng_have(NNG_HAVE_POLL)
+    nng_have(NNG_HAVE_SELECT)
+
+    # C11 / modern compiler+libc baselines (GCC >=4.9, Clang >=3.3,
+    # glibc >=2.17, musl, macOS >=10.15, BSD).
+    nng_have(NNG_HAVE_STDATOMIC)
+    nng_have(NNG_HAVE_TIMESPEC_GET)
+    nng_have(NNG_HAVE_CLOCK_GETTIME_LIBC)
+    nng_have(NNG_HAVE_CLOCK_GETTIME)
+
+    # Per-OS feature matrix.  These are hardcoded rather than probed so cold
+    # cmake configure stays cheap; the underlying platforms do not vary on
+    # these features within their supported release ranges.
+
+    # Common BSD features (Darwin, FreeBSD, NetBSD, OpenBSD).
+    if (NNG_PLATFORM_BSD)
+        nng_have(NNG_HAVE_LOCKF)
+        nng_have(NNG_HAVE_FLOCK)
+        nng_have(NNG_HAVE_ARC4RANDOM)
+        nng_have(NNG_HAVE_GETENTROPY)
+        nng_have(NNG_HAVE_SYS_RANDOM)
+        nng_have(NNG_HAVE_KQUEUE)
+        nng_have(NNG_HAVE_GETPEEREID)
+        nng_have(NNG_HAVE_BACKTRACE)
     endif()
-    nng_check_lib(pthread sem_wait NNG_HAVE_SEMAPHORE_PTHREAD)
-    nng_check_lib(pthread pthread_atfork NNG_HAVE_PTHREAD_ATFORK_PTHREAD)
-    nng_check_lib(pthread pthread_set_name_np NNG_HAVE_PTHREAD_SET_NAME_NP)
-    nng_check_lib(pthread pthread_setname_np NNG_HAVE_PTHREAD_SETNAME_NP)
+
+    if (NNG_PLATFORM_LINUX)
+        nng_have(NNG_HAVE_EVENTFD)
+        nng_have(NNG_HAVE_EPOLL)
+        nng_have(NNG_HAVE_EPOLL_CREATE1)
+        nng_have(NNG_HAVE_SOPEERCRED)
+        nng_have(NNG_HAVE_LOCKF)
+        nng_have(NNG_HAVE_PTHREAD_SETNAME_NP)
+        # backtrace(3) is glibc-only on Linux; musl ships <execinfo.h> as a
+        # stub or omits it. Android's bionic gained it in NDK r23. Probe.
+        nng_check_sym(backtrace_symbols_fd execinfo.h NNG_HAVE_BACKTRACE)
+    elseif (NNG_PLATFORM_DARWIN)
+        nng_have(NNG_HAVE_LOCALPEERCRED)
+        nng_have(NNG_HAVE_LOCALPEERPID)
+        nng_have(NNG_HAVE_PTHREAD_SETNAME_NP)
+    elseif (NNG_PLATFORM_FREEBSD)
+        nng_have(NNG_HAVE_LOCALPEERCRED)
+        # FreeBSD has both pthread_set_name_np (always) and pthread_setname_np
+        # (since 12.2). Use the older form so we keep working on FreeBSD < 12.2.
+        nng_have(NNG_HAVE_PTHREAD_SET_NAME_NP)
+    elseif (NNG_PLATFORM_NETBSD)
+        nng_have(NNG_HAVE_PTHREAD_SETNAME_NP)
+    elseif (NNG_PLATFORM_OPENBSD)
+        nng_have(NNG_HAVE_SOCKPEERCRED)
+        nng_have(NNG_HAVE_PTHREAD_SET_NAME_NP)
+    elseif (NNG_PLATFORM_SUNOS)
+        nng_have(NNG_HAVE_LOCKF)
+        nng_have(NNG_HAVE_GETPEERUCRED)
+        nng_have(NNG_HAVE_BACKTRACE)
+        nng_have(NNG_HAVE_PTHREAD_SETNAME_NP)
+        # SunOS / illumos requires linking -lsocket for socket(2) and friends.
+        nng_link_libraries(socket)
+    elseif (NNG_PLATFORM_QNX)
+        nng_have(NNG_HAVE_LOCKF)
+        nng_have(NNG_HAVE_PTHREAD_SETNAME_NP)
+    else()
+        # Unknown POSIX target (Haiku, DragonFly, Hurd, AIX, ...).  Fall back
+        # to the original probe-based detection so the build still selects a
+        # working poller, entropy source, file lock and thread-name primitive.
+        nng_check_func(lockf NNG_HAVE_LOCKF)
+        nng_check_func(flock NNG_HAVE_FLOCK)
+        nng_check_func(arc4random_buf NNG_HAVE_ARC4RANDOM)
+        nng_check_sym(kqueue sys/event.h NNG_HAVE_KQUEUE)
+        nng_check_sym(eventfd sys/eventfd.h NNG_HAVE_EVENTFD)
+        nng_check_sym(epoll_create sys/epoll.h NNG_HAVE_EPOLL)
+        nng_check_sym(epoll_create1 sys/epoll.h NNG_HAVE_EPOLL_CREATE1)
+        nng_check_sym(getpeereid unistd.h NNG_HAVE_GETPEEREID)
+        nng_check_sym(SO_PEERCRED sys/socket.h NNG_HAVE_SOPEERCRED)
+        nng_check_sym(LOCAL_PEERCRED sys/un.h NNG_HAVE_LOCALPEERCRED)
+        nng_check_sym(backtrace_symbols_fd execinfo.h NNG_HAVE_BACKTRACE)
+        nng_check_lib(pthread pthread_setname_np NNG_HAVE_PTHREAD_SETNAME_NP)
+        nng_check_lib(pthread pthread_set_name_np NNG_HAVE_PTHREAD_SET_NAME_NP)
+    endif()
+
+    # getentropy availability depends on glibc (>=2.25) / bionic (>=API 28);
+    # also probed in the unknown-POSIX fallback above.
+    if (NNG_PLATFORM_LINUX)
+        nng_check_func(getentropy NNG_HAVE_GETENTROPY)
+        nng_check_func(getrandom NNG_HAVE_GETRANDOM)
+        nng_check_sym(getentropy sys/random.h NNG_HAVE_SYS_RANDOM)
+    elseif (NOT (NNG_PLATFORM_BSD OR NNG_PLATFORM_SUNOS OR NNG_PLATFORM_QNX))
+        nng_check_func(getentropy NNG_HAVE_GETENTROPY)
+        nng_check_func(getrandom NNG_HAVE_GETRANDOM)
+        nng_check_sym(getentropy sys/random.h NNG_HAVE_SYS_RANDOM)
+    endif()
+
+    # libnsl was historically required on SunOS and very old glibc for
+    # gethostbyname.  Probe only on SunOS where it still matters.
     if (NNG_PLATFORM_SUNOS)
-        nng_defines(NNG_HAVE_SOCKETPAIR)
         nng_check_lib(nsl gethostbyname NNG_HAVE_LIBNSL)
-        nng_check_lib(socket socket NNG_HAVE_LIBSOCKET)
-    else()
-        nng_check_lib(nsl gethostbyname NNG_HAVE_LIBNSL)
-        nng_check_lib(socket socket NNG_HAVE_LIBSOCKET)
     endif()
 
-    # GCC needs libatomic on some architectures (e.g. ARM) because the
-    # underlying architecture may lack the necessary atomic primitives.
-    # One hopes that the libatomic implementation is superior to just using
-    # a pthread mutex.  The symbol chosen here was identified from GCC's
-    # libatomic map file.
-    #
-    # Arguably when using clang, compiler-rt might be better.
-    nng_check_lib(atomic __atomic_load_1 NNG_HAVE_LIBATOMIC)
-
-    nng_check_sym(AF_UNIX sys/socket.h NNG_HAVE_UNIX_SOCKETS)
-    nng_check_sym(backtrace_symbols_fd execinfo.h NNG_HAVE_BACKTRACE)
-    nng_check_struct_member(msghdr msg_control sys/socket.h NNG_HAVE_MSG_CONTROL)
-    nng_check_sym(eventfd sys/eventfd.h NNG_HAVE_EVENTFD)
-    nng_check_sym(kqueue sys/event.h NNG_HAVE_KQUEUE)
-    # Disabling illumos PORTs until we get a chance to fix them.
-    #    nng_check_sym(port_create port.h NNG_HAVE_PORT_CREATE)
-    nng_check_sym(epoll_create sys/epoll.h NNG_HAVE_EPOLL)
-    nng_check_sym(epoll_create1 sys/epoll.h NNG_HAVE_EPOLL_CREATE1)
-    nng_check_sym(poll poll.h NNG_HAVE_POLL)
-    nng_check_sym(select sys/select.h NNG_HAVE_SELECT)
-    nng_check_sym(getpeereid unistd.h NNG_HAVE_GETPEEREID)
-    nng_check_sym(SO_PEERCRED sys/socket.h NNG_HAVE_SOPEERCRED)
-    nng_check_struct_member(sockpeercred uid sys/socket.h NNG_HAVE_SOCKPEERCRED)
-    nng_check_sym(LOCAL_PEERCRED sys/un.h NNG_HAVE_LOCALPEERCRED)
-    nng_check_sym(LOCAL_PEERPID sys/un.h NNG_HAVE_LOCALPEERPID)
-    nng_check_sym(getpeerucred ucred.h NNG_HAVE_GETPEERUCRED)
-    nng_check_sym(atomic_flag_test_and_set stdatomic.h NNG_HAVE_STDATOMIC)
-    nng_check_sym(socketpair sys/socket.h NNG_HAVE_SOCKETPAIR)
-    nng_check_sym(AF_INET6 netinet/in.h NNG_HAVE_INET6)
-    nng_check_sym(AF_INET6 netinet6/in6.h NNG_HAVE_INET6_BSD)
-    nng_check_sym(timespec_get time.h NNG_HAVE_TIMESPEC_GET)
-    nng_check_sym(getentropy sys/random.h NNG_HAVE_SYS_RANDOM)
+    # GCC needs libatomic on some architectures (ARM, RISC-V, s390x, sparc,
+    # loongarch, mips, 32-bit x86, ...) where the architecture lacks atomic
+    # primitives for some operand sizes. Denylist x86_64/amd64 only since
+    # those are the only arches where libatomic is provably never needed.
+    if (NNG_PLATFORM_LINUX AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+        nng_check_lib(atomic __atomic_load_1 NNG_HAVE_LIBATOMIC)
+    endif()
 
     nng_sources(
             posix_impl.h

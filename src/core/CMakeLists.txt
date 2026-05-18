@@ -10,12 +10,22 @@
 #  Core.
 nng_directory(core)
 
-nng_check_sym(strlcpy string.h NNG_HAVE_STRLCPY)
-nng_check_sym(strnlen string.h NNG_HAVE_STRNLEN)
-nng_check_sym(strcasecmp string.h NNG_HAVE_STRCASECMP)
-nng_check_sym(strncasecmp string.h NNG_HAVE_STRNCASECMP)
-nng_check_sym(localtime_r time.h NNG_HAVE_LOCALTIME_R)
-nng_check_sym(syslog syslog.h NNG_HAVE_SYSLOG)
+# All POSIX targets provide strnlen, strcasecmp, strncasecmp, localtime_r,
+# and syslog -- these are POSIX.1-mandated, so no probe is needed.
+# strlcpy is universally available on BSD/Darwin/Android/musl/QNX/SunOS but
+# only appeared in glibc 2.38 (Aug 2023), so we still probe on Linux.
+if (NNG_PLATFORM_POSIX)
+    nng_defines(NNG_HAVE_STRNLEN)
+    nng_defines(NNG_HAVE_STRCASECMP)
+    nng_defines(NNG_HAVE_STRNCASECMP)
+    nng_defines(NNG_HAVE_LOCALTIME_R)
+    nng_defines(NNG_HAVE_SYSLOG)
+endif()
+if (NNG_PLATFORM_LINUX AND NOT NNG_PLATFORM_ANDROID)
+    nng_check_sym(strlcpy string.h NNG_HAVE_STRLCPY)
+elseif (NNG_PLATFORM_POSIX)
+    nng_defines(NNG_HAVE_STRLCPY)
+endif()
 
 nng_sources(
         defs.h
